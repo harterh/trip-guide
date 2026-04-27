@@ -1,6 +1,6 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { attractions, audienceOptions, categoryOptions, regions } from './data/attractions'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { audienceOptions, categoryOptions, regions as defaultRegions } from './data/attractions'
 
 const routeHash = ref(window.location.hash || '#/')
 const keyword = ref('')
@@ -8,10 +8,59 @@ const selectedRegions = ref([])
 const selectedAudiences = ref([])
 const selectedCategories = ref([])
 const sortBy = ref('popular')
+const attractions = ref([])
+const attractionsLoading = ref(false)
+const attractionsError = ref('')
+const publicRegions = ref([])
 const authError = ref('')
 const authMessage = ref('')
+const authLoading = ref(false)
+const adminUsers = ref([])
+const adminLoading = ref(false)
+const adminError = ref('')
+const adminMessage = ref('')
+const adminSettingsOpen = ref(true)
+const adminTravelOpen = ref(true)
+const adminAttractions = ref([])
+const adminRegions = ref([])
+const editingAttractionId = ref('')
+const editingRegionId = ref('')
+const showAttractionDialog = ref(false)
+const showRegionDialog = ref(false)
+const resetPasswords = ref({})
+const emptyRegionForm = {
+  id: '',
+  name: ''
+}
+const regionForm = ref({ ...emptyRegionForm })
+const emptyAttractionForm = {
+  id: '',
+  name: '',
+  regionId: '',
+  province: '',
+  city: '',
+  address: '',
+  summary: '',
+  categoriesText: '',
+  audienceTagsText: '',
+  suggestedDuration: '',
+  bestMonthsText: '',
+  budget: '',
+  popularityScore: '',
+  coverImage: '',
+  travelTimeTips: '',
+  transportationPlane: '',
+  transportationRail: '',
+  transportationLocal: '',
+  transportationSelfDrive: '',
+  routeTipsText: '',
+  highlightsText: '',
+  noticesText: '',
+  nearbyText: ''
+}
+const attractionForm = ref({ ...emptyAttractionForm })
 const heroIndex = ref(0)
-const loginForm = ref({ email: '', password: '' })
+const loginForm = ref({ identifier: '', password: '' })
 const registerForm = ref({
   username: '',
   email: '',
@@ -26,6 +75,9 @@ let heroTimer
 onMounted(() => {
   window.addEventListener('hashchange', handleHashChange)
   heroTimer = window.setInterval(showNextHero, 5000)
+  loadPublicRegions()
+  loadAttractions()
+  loadAdminDataIfNeeded()
 })
 
 onBeforeUnmount(() => {
@@ -35,12 +87,13 @@ onBeforeUnmount(() => {
 
 const currentPath = computed(() => routeHash.value.replace(/^#/, '') || '/')
 const detailId = computed(() => currentPath.value.match(/^\/attractions\/([^/]+)$/)?.[1] || '')
-const selectedAttraction = computed(() => attractions.find((item) => item.id === detailId.value))
+const selectedAttraction = computed(() => attractions.value.find((item) => item.id === detailId.value))
 
 const routeName = computed(() => {
   if (currentPath.value === '/' || currentPath.value === '/attractions') return 'home'
   if (currentPath.value === '/login') return 'login'
   if (currentPath.value === '/register') return 'register'
+  if (currentPath.value === '/admin' || currentPath.value.startsWith('/admin/')) return 'admin'
   if (currentPath.value === '/profile') return 'profile'
   if (detailId.value) return selectedAttraction.value ? 'detail' : 'missing'
   return 'missing'
@@ -48,7 +101,7 @@ const routeName = computed(() => {
 
 const filteredAttractions = computed(() => {
   const text = keyword.value.trim().toLowerCase()
-  const result = attractions.filter((item) => {
+  const result = attractions.value.filter((item) => {
     const searchable = [
       item.name,
       item.region,
@@ -75,8 +128,8 @@ const filteredAttractions = computed(() => {
 
   return [...result].sort((a, b) => {
     if (sortBy.value === 'duration') return durationRank(a.suggestedDuration) - durationRank(b.suggestedDuration)
-    if (sortBy.value === 'season') return a.bestMonths[0] - b.bestMonths[0]
-    return b.popularityScore - a.popularityScore
+    if (sortBy.value === 'season') return (a.bestMonths[0] || 99) - (b.bestMonths[0] || 99)
+    return (b.popularityScore || 0) - (a.popularityScore || 0)
   })
 })
 
@@ -84,16 +137,57 @@ const activeFilterCount = computed(
   () => selectedRegions.value.length + selectedAudiences.value.length + selectedCategories.value.length + (keyword.value ? 1 : 0)
 )
 
-const favoriteNames = computed(() => attractions.filter((item) => favorites.value.includes(item.id)).map((item) => item.name))
+const favoriteNames = computed(() =>
+  attractions.value.filter((item) => favorites.value.includes(item.id)).map((item) => item.name)
+)
+const isAdmin = computed(() => currentUser.value?.role === 'admin')
+const isAdminHome = computed(() => currentPath.value === '/admin')
+const isAdminUsersPage = computed(() => currentPath.value === '/admin/users')
+const isAdminRegionsPage = computed(() => currentPath.value === '/admin/regions')
+const isAdminAttractionsPage = computed(() => currentPath.value === '/admin/attractions')
+const adminStats = computed(() => {
+  const total = adminUsers.value.length
+  const active = adminUsers.value.filter((user) => user.isActive).length
+  const disabled = total - active
+  const admins = adminUsers.value.filter((user) => user.role === 'admin').length
+
+  return { total, active, disabled, admins }
+})
+const adminAttractionStats = computed(() => {
+  const total = adminAttractions.value.length
+  const active = adminAttractions.value.filter((item) => item.isActive).length
+  return { total, active, disabled: total - active }
+})
+const adminRegionStats = computed(() => {
+  const total = adminRegions.value.length
+  const active = adminRegions.value.filter((item) => item.isActive).length
+  return { total, active, disabled: total - active }
+})
+const regionOptions = computed(() =>
+  publicRegions.value.length
+    ? publicRegions.value
+    : defaultRegions.map((name) => ({
+        id: name,
+        name,
+        isActive: true
+      }))
+)
 const topHeroAttractions = computed(() =>
-  [...attractions].sort((a, b) => b.popularityScore - a.popularityScore).slice(0, 3)
+  [...attractions.value].sort((a, b) => (b.popularityScore || 0) - (a.popularityScore || 0)).slice(0, 3)
 )
 const activeHeroAttraction = computed(() => topHeroAttractions.value[heroIndex.value] || topHeroAttractions.value[0])
+const selectedTransportation = computed(() => selectedAttraction.value?.transportation || {})
+
+watch(currentPath, () => {
+  loadAdminDataIfNeeded()
+})
 
 function handleHashChange() {
   routeHash.value = window.location.hash || '#/'
   authError.value = ''
   authMessage.value = ''
+  adminError.value = ''
+  adminMessage.value = ''
 }
 
 function showHero(index) {
@@ -103,6 +197,7 @@ function showHero(index) {
 }
 
 function showNextHero() {
+  if (topHeroAttractions.value.length === 0) return
   heroIndex.value = (heroIndex.value + 1) % topHeroAttractions.value.length
 }
 
@@ -134,14 +229,6 @@ function durationRank(duration) {
   return Number.isNaN(firstNumber) ? 99 : firstNumber
 }
 
-function loadUsers() {
-  return JSON.parse(localStorage.getItem('tripGuideUsers') || '[]')
-}
-
-function saveUsers(users) {
-  localStorage.setItem('tripGuideUsers', JSON.stringify(users))
-}
-
 function loadCurrentUser() {
   return JSON.parse(localStorage.getItem('tripGuideCurrentUser') || 'null')
 }
@@ -160,12 +247,81 @@ function saveFavorites(nextFavorites) {
   localStorage.setItem('tripGuideFavorites', JSON.stringify(nextFavorites))
 }
 
-function simplePasswordHash(password) {
-  return btoa(unescape(encodeURIComponent(`trip-guide:${password}`)))
+function normalizeAttraction(attraction) {
+  return {
+    ...attraction,
+    region: attraction.region || '',
+    province: attraction.province || '',
+    city: attraction.city || '',
+    address: attraction.address || '',
+    summary: attraction.summary || '',
+    categories: Array.isArray(attraction.categories) ? attraction.categories : [],
+    audienceTags: Array.isArray(attraction.audienceTags) ? attraction.audienceTags : [],
+    suggestedDuration: attraction.suggestedDuration || '',
+    bestMonths: Array.isArray(attraction.bestMonths) ? attraction.bestMonths : [],
+    budget: attraction.budget || '',
+    popularityScore: Number.isFinite(Number(attraction.popularityScore)) ? Number(attraction.popularityScore) : 0,
+    coverImage: attraction.coverImage || '/images/west-lake.jpg',
+    travelTimeTips: attraction.travelTimeTips || '',
+    transportation: attraction.transportation || {},
+    routeTips: Array.isArray(attraction.routeTips) ? attraction.routeTips : [],
+    highlights: Array.isArray(attraction.highlights) ? attraction.highlights : [],
+    notices: Array.isArray(attraction.notices) ? attraction.notices : [],
+    nearby: Array.isArray(attraction.nearby) ? attraction.nearby : []
+  }
+}
+
+async function loadAttractions() {
+  attractionsLoading.value = true
+  attractionsError.value = ''
+  try {
+    const result = await apiRequest('/api/attractions', undefined, { method: 'GET' })
+    attractions.value = result.attractions.map(normalizeAttraction)
+    heroIndex.value = 0
+  } catch (error) {
+    attractionsError.value = error.message
+  } finally {
+    attractionsLoading.value = false
+  }
+}
+
+async function loadPublicRegions() {
+  try {
+    const result = await apiRequest('/api/regions', undefined, { method: 'GET' })
+    publicRegions.value = result.regions
+    const availableNames = new Set(publicRegions.value.map((region) => region.name))
+    selectedRegions.value = selectedRegions.value.filter((name) => availableNames.has(name))
+  } catch {
+    publicRegions.value = defaultRegions.map((name) => ({
+      id: name,
+      name,
+      isActive: true
+    }))
+  }
 }
 
 function validatePassword(password) {
   return password.length >= 8 && /[A-Za-z]/.test(password) && /\d/.test(password)
+}
+
+async function apiRequest(path, data, options = {}) {
+  const headers = { 'Content-Type': 'application/json' }
+  if (options.admin) {
+    headers['X-User-Id'] = currentUser.value?.id || ''
+  }
+
+  const response = await fetch(path, {
+    method: options.method || 'POST',
+    headers,
+    body: data === undefined ? undefined : JSON.stringify(data)
+  })
+  const result = await response.json().catch(() => ({}))
+
+  if (!response.ok) {
+    throw new Error(result.message || '请求失败，请稍后再试。')
+  }
+
+  return result
 }
 
 function loginRedirectTarget() {
@@ -177,30 +333,32 @@ function requestLogin() {
   navigate('/login')
 }
 
-function handleLogin() {
+async function handleLogin() {
   authError.value = ''
-  const email = loginForm.value.email.trim().toLowerCase()
+  const identifier = loginForm.value.identifier.trim()
   const password = loginForm.value.password
 
-  if (!email || !password) {
-    authError.value = '请输入邮箱和密码。'
+  if (!identifier || !password) {
+    authError.value = '请输入用户名或邮箱和密码。'
     return
   }
 
-  const user = loadUsers().find((item) => item.email === email)
-  if (!user || user.passwordHash !== simplePasswordHash(password)) {
-    authError.value = '邮箱或密码错误。'
-    return
+  authLoading.value = true
+  try {
+    const { user } = await apiRequest('/api/auth/login', { identifier, password })
+    saveCurrentUser(user)
+    const target = loginRedirectTarget()
+    sessionStorage.removeItem('tripGuideRedirect')
+    loginForm.value = { identifier: '', password: '' }
+    navigate(target)
+  } catch (error) {
+    authError.value = error.message
+  } finally {
+    authLoading.value = false
   }
-
-  saveCurrentUser({ id: user.id, username: user.username, email: user.email, createdAt: user.createdAt })
-  const target = loginRedirectTarget()
-  sessionStorage.removeItem('tripGuideRedirect')
-  loginForm.value = { email: '', password: '' }
-  navigate(target)
 }
 
-function handleRegister() {
+async function handleRegister() {
   authError.value = ''
   const username = registerForm.value.username.trim()
   const email = registerForm.value.email.trim().toLowerCase()
@@ -232,33 +390,413 @@ function handleRegister() {
     return
   }
 
-  const users = loadUsers()
-  if (users.some((item) => item.email === email || item.username === username)) {
-    authError.value = '用户名或邮箱不可用。'
-    return
+  authLoading.value = true
+  try {
+    const { user } = await apiRequest('/api/auth/register', { username, email, password })
+    saveCurrentUser(user)
+    registerForm.value = { username: '', email: '', password: '', confirmPassword: '', accepted: false }
+    const target = loginRedirectTarget()
+    sessionStorage.removeItem('tripGuideRedirect')
+    navigate(target)
+  } catch (error) {
+    authError.value = error.message
+  } finally {
+    authLoading.value = false
   }
-
-  const user = {
-    id: crypto.randomUUID(),
-    username,
-    email,
-    passwordHash: simplePasswordHash(password),
-    createdAt: new Date().toISOString()
-  }
-
-  saveUsers([...users, user])
-  saveCurrentUser({ id: user.id, username: user.username, email: user.email, createdAt: user.createdAt })
-  registerForm.value = { username: '', email: '', password: '', confirmPassword: '', accepted: false }
-  const target = loginRedirectTarget()
-  sessionStorage.removeItem('tripGuideRedirect')
-  navigate(target)
 }
 
 function logout() {
   localStorage.removeItem('tripGuideCurrentUser')
   currentUser.value = null
+  adminUsers.value = []
+  adminAttractions.value = []
+  adminRegions.value = []
   authMessage.value = '已退出登录。'
   navigate('/')
+}
+
+async function loadAdminDataIfNeeded() {
+  if (routeName.value !== 'admin' || !isAdmin.value) return
+  await Promise.all([loadAdminUsers(), loadAdminAttractions(), loadAdminRegions()])
+}
+
+async function loadAdminUsersIfNeeded() {
+  await loadAdminUsers()
+}
+
+async function loadAdminUsers() {
+  if (routeName.value !== 'admin' || !isAdmin.value) return
+
+  adminLoading.value = true
+  adminError.value = ''
+  try {
+    const { users } = await apiRequest('/api/admin/users', undefined, { method: 'GET', admin: true })
+    adminUsers.value = users
+  } catch (error) {
+    adminError.value = error.message
+  } finally {
+    adminLoading.value = false
+  }
+}
+
+async function loadAdminAttractions() {
+  if (routeName.value !== 'admin' || !isAdmin.value) return
+
+  adminLoading.value = true
+  adminError.value = ''
+  try {
+    const result = await apiRequest('/api/admin/attractions', undefined, { method: 'GET', admin: true })
+    adminAttractions.value = result.attractions
+  } catch (error) {
+    adminError.value = error.message
+  } finally {
+    adminLoading.value = false
+  }
+}
+
+async function loadAdminRegions() {
+  if (routeName.value !== 'admin' || !isAdmin.value) return
+
+  adminLoading.value = true
+  adminError.value = ''
+  try {
+    const result = await apiRequest('/api/admin/regions', undefined, { method: 'GET', admin: true })
+    adminRegions.value = result.regions
+  } catch (error) {
+    adminError.value = error.message
+  } finally {
+    adminLoading.value = false
+  }
+}
+
+async function resetUserPassword(user) {
+  adminError.value = ''
+  adminMessage.value = ''
+  const password = resetPasswords.value[user.id] || ''
+
+  if (!validatePassword(password)) {
+    adminError.value = '新密码至少 8 位，且包含字母和数字。'
+    return
+  }
+
+  adminLoading.value = true
+  try {
+    const { message } = await apiRequest(
+      `/api/admin/users/${user.id}/password`,
+      { password },
+      { method: 'PATCH', admin: true }
+    )
+    resetPasswords.value[user.id] = ''
+    adminMessage.value = `${user.username}：${message}`
+  } catch (error) {
+    adminError.value = error.message
+  } finally {
+    adminLoading.value = false
+  }
+}
+
+async function setUserStatus(user, isActive) {
+  adminError.value = ''
+  adminMessage.value = ''
+  adminLoading.value = true
+  try {
+    const { message } = await apiRequest(
+      `/api/admin/users/${user.id}/status`,
+      { isActive },
+      { method: 'PATCH', admin: true }
+    )
+    adminMessage.value = `${user.username}：${message}`
+    await loadAdminUsersIfNeeded()
+  } catch (error) {
+    adminError.value = error.message
+  } finally {
+    adminLoading.value = false
+  }
+}
+
+function regionFormPayload() {
+  return {
+    id: regionForm.value.id.trim(),
+    name: regionForm.value.name.trim()
+  }
+}
+
+function validateRegionRequiredFields(payload) {
+  if (!payload.id) return '请填写地区 ID。'
+  if (!payload.name) return '请填写地区名称。'
+  return ''
+}
+
+function resetRegionForm() {
+  editingRegionId.value = ''
+  regionForm.value = { ...emptyRegionForm }
+}
+
+function openNewRegionDialog() {
+  adminError.value = ''
+  adminMessage.value = ''
+  resetRegionForm()
+  showRegionDialog.value = true
+}
+
+function closeRegionDialog() {
+  adminError.value = ''
+  showRegionDialog.value = false
+  resetRegionForm()
+}
+
+function editRegion(region) {
+  adminError.value = ''
+  adminMessage.value = ''
+  editingRegionId.value = region.id
+  regionForm.value = {
+    id: region.id,
+    name: region.name
+  }
+  showRegionDialog.value = true
+}
+
+async function saveRegion() {
+  adminError.value = ''
+  adminMessage.value = ''
+  const payload = regionFormPayload()
+  const validationMessage = validateRegionRequiredFields(payload)
+
+  if (validationMessage) {
+    adminError.value = validationMessage
+    return
+  }
+
+  adminLoading.value = true
+  try {
+    const result = editingRegionId.value
+      ? await apiRequest(`/api/admin/regions/${editingRegionId.value}`, payload, { method: 'PATCH', admin: true })
+      : await apiRequest('/api/admin/regions', payload, { method: 'POST', admin: true })
+    adminMessage.value = `${payload.name}：${result.message}`
+    showRegionDialog.value = false
+    resetRegionForm()
+    await loadAdminRegions()
+    await loadPublicRegions()
+    await loadAdminAttractions()
+    await loadAttractions()
+  } catch (error) {
+    adminError.value = error.message
+    window.alert(error.message)
+  } finally {
+    adminLoading.value = false
+  }
+}
+
+async function setRegionStatus(region, isActive) {
+  adminError.value = ''
+  adminMessage.value = ''
+  adminLoading.value = true
+
+  try {
+    const { message } = await apiRequest(
+      `/api/admin/regions/${region.id}/status`,
+      { isActive },
+      { method: 'PATCH', admin: true }
+    )
+    adminMessage.value = `${region.name}：${message}`
+    await loadAdminRegions()
+    await loadPublicRegions()
+  } catch (error) {
+    adminError.value = error.message
+  } finally {
+    adminLoading.value = false
+  }
+}
+
+async function deleteRegion(region) {
+  if (!window.confirm(`确认删除“${region.name}”？`)) return
+
+  adminError.value = ''
+  adminMessage.value = ''
+  adminLoading.value = true
+
+  try {
+    const { message } = await apiRequest(`/api/admin/regions/${region.id}`, undefined, {
+      method: 'DELETE',
+      admin: true
+    })
+    adminMessage.value = `${region.name}：${message}`
+    if (editingRegionId.value === region.id) resetRegionForm()
+    await loadAdminRegions()
+    await loadPublicRegions()
+    await loadAdminAttractions()
+    await loadAttractions()
+  } catch (error) {
+    adminError.value = error.message
+  } finally {
+    adminLoading.value = false
+  }
+}
+
+function splitTextList(text) {
+  return String(text || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function attractionFormPayload() {
+  return {
+    id: attractionForm.value.id.trim(),
+    name: attractionForm.value.name.trim(),
+    regionId: attractionForm.value.regionId.trim(),
+    province: attractionForm.value.province.trim(),
+    city: attractionForm.value.city.trim(),
+    address: attractionForm.value.address.trim(),
+    summary: attractionForm.value.summary.trim(),
+    categories: splitTextList(attractionForm.value.categoriesText),
+    audienceTags: splitTextList(attractionForm.value.audienceTagsText),
+    suggestedDuration: attractionForm.value.suggestedDuration.trim(),
+    bestMonths: splitTextList(attractionForm.value.bestMonthsText),
+    budget: attractionForm.value.budget.trim(),
+    popularityScore: attractionForm.value.popularityScore === '' ? null : attractionForm.value.popularityScore,
+    coverImage: attractionForm.value.coverImage.trim(),
+    travelTimeTips: attractionForm.value.travelTimeTips.trim(),
+    transportation: {
+      plane: attractionForm.value.transportationPlane.trim(),
+      rail: attractionForm.value.transportationRail.trim(),
+      local: attractionForm.value.transportationLocal.trim(),
+      selfDrive: attractionForm.value.transportationSelfDrive.trim()
+    },
+    routeTips: splitTextList(attractionForm.value.routeTipsText),
+    highlights: splitTextList(attractionForm.value.highlightsText),
+    notices: splitTextList(attractionForm.value.noticesText),
+    nearby: splitTextList(attractionForm.value.nearbyText)
+  }
+}
+
+function validateAttractionRequiredFields(payload) {
+  if (!payload.id) return '请填写景点 ID。'
+  if (!payload.name) return '请填写景点名称。'
+  return ''
+}
+
+function resetAttractionForm() {
+  editingAttractionId.value = ''
+  attractionForm.value = { ...emptyAttractionForm }
+}
+
+function openNewAttractionDialog() {
+  adminError.value = ''
+  adminMessage.value = ''
+  resetAttractionForm()
+  showAttractionDialog.value = true
+}
+
+function closeAttractionDialog() {
+  adminError.value = ''
+  showAttractionDialog.value = false
+  resetAttractionForm()
+}
+
+function editAttraction(attraction) {
+  adminError.value = ''
+  adminMessage.value = ''
+  editingAttractionId.value = attraction.id
+  attractionForm.value = {
+    id: attraction.id,
+    name: attraction.name,
+    regionId: attraction.regionId || '',
+    province: attraction.province,
+    city: attraction.city,
+    address: attraction.address,
+    summary: attraction.summary,
+    categoriesText: attraction.categories.join(', '),
+    audienceTagsText: attraction.audienceTags.join(', '),
+    suggestedDuration: attraction.suggestedDuration,
+    bestMonthsText: attraction.bestMonths.join(', '),
+    budget: attraction.budget,
+    popularityScore: attraction.popularityScore,
+    coverImage: attraction.coverImage,
+    travelTimeTips: attraction.travelTimeTips || '',
+    transportationPlane: attraction.transportation?.plane || '',
+    transportationRail: attraction.transportation?.rail || '',
+    transportationLocal: attraction.transportation?.local || '',
+    transportationSelfDrive: attraction.transportation?.selfDrive || '',
+    routeTipsText: (attraction.routeTips || []).join(', '),
+    highlightsText: (attraction.highlights || []).join(', '),
+    noticesText: (attraction.notices || []).join(', '),
+    nearbyText: (attraction.nearby || []).join(', ')
+  }
+  showAttractionDialog.value = true
+}
+
+async function saveAttraction() {
+  adminError.value = ''
+  adminMessage.value = ''
+  const payload = attractionFormPayload()
+  const validationMessage = validateAttractionRequiredFields(payload)
+
+  if (validationMessage) {
+    adminError.value = validationMessage
+    return
+  }
+
+  adminLoading.value = true
+  try {
+    const result = editingAttractionId.value
+      ? await apiRequest(`/api/admin/attractions/${editingAttractionId.value}`, payload, { method: 'PATCH', admin: true })
+      : await apiRequest('/api/admin/attractions', payload, { method: 'POST', admin: true })
+    adminMessage.value = `${payload.name}：${result.message}`
+    showAttractionDialog.value = false
+    resetAttractionForm()
+    await loadAdminAttractions()
+    await loadAttractions()
+  } catch (error) {
+    adminError.value = error.message
+    window.alert(error.message)
+  } finally {
+    adminLoading.value = false
+  }
+}
+
+async function setAttractionStatus(attraction, isActive) {
+  adminError.value = ''
+  adminMessage.value = ''
+  adminLoading.value = true
+
+  try {
+    const { message } = await apiRequest(
+      `/api/admin/attractions/${attraction.id}/status`,
+      { isActive },
+      { method: 'PATCH', admin: true }
+    )
+    adminMessage.value = `${attraction.name}：${message}`
+    await loadAdminAttractions()
+    await loadAttractions()
+  } catch (error) {
+    adminError.value = error.message
+  } finally {
+    adminLoading.value = false
+  }
+}
+
+async function deleteAttraction(attraction) {
+  if (!window.confirm(`确认删除“${attraction.name}”？`)) return
+
+  adminError.value = ''
+  adminMessage.value = ''
+  adminLoading.value = true
+
+  try {
+    const { message } = await apiRequest(`/api/admin/attractions/${attraction.id}`, undefined, {
+      method: 'DELETE',
+      admin: true
+    })
+    adminMessage.value = `${attraction.name}：${message}`
+    if (editingAttractionId.value === attraction.id) resetAttractionForm()
+    await loadAdminAttractions()
+    await loadAttractions()
+  } catch (error) {
+    adminError.value = error.message
+  } finally {
+    adminLoading.value = false
+  }
 }
 
 function toggleFavorite(attractionId) {
@@ -288,6 +826,9 @@ function toggleFavorite(attractionId) {
 
       <nav class="nav-actions" aria-label="主导航">
         <button :class="{ active: routeName === 'home' }" type="button" @click="navigate('/')">景点</button>
+        <button v-if="isAdmin" :class="{ active: routeName === 'admin' }" type="button" @click="navigate('/admin')">
+          后台
+        </button>
         <button v-if="!currentUser" type="button" @click="navigate('/login')">登录</button>
         <button v-if="!currentUser" class="primary-btn" type="button" @click="navigate('/register')">注册</button>
         <button v-if="currentUser" type="button" @click="navigate('/profile')">{{ currentUser.username }}</button>
@@ -297,7 +838,7 @@ function toggleFavorite(attractionId) {
 
     <main>
       <section v-if="routeName === 'home'" class="home-view">
-        <div class="travel-strip">
+        <div v-if="activeHeroAttraction" class="travel-strip">
           <img
             v-for="(attraction, index) in topHeroAttractions"
             :key="attraction.id"
@@ -314,7 +855,7 @@ function toggleFavorite(attractionId) {
           <div class="hero-side">
             <div class="strip-stats">
               <span><strong>{{ attractions.length }}</strong>景点</span>
-              <span><strong>{{ regions.length }}</strong>地区</span>
+              <span><strong>{{ regionOptions.length }}</strong>地区</span>
               <span><strong>{{ audienceOptions.length }}</strong>人群</span>
             </div>
             <div class="carousel-controls" aria-label="热门景点轮播">
@@ -331,6 +872,10 @@ function toggleFavorite(attractionId) {
             </div>
           </div>
         </div>
+        <section v-else class="empty-state">
+          <h2>{{ attractionsLoading ? '正在加载景点' : '暂无景点' }}</h2>
+          <p>{{ attractionsError || '后台启用景点后会显示在首页。' }}</p>
+        </section>
 
         <section class="filter-panel" aria-label="景点筛选">
           <div class="filter-row main-filter">
@@ -354,13 +899,13 @@ function toggleFavorite(attractionId) {
           <div class="chip-group" aria-label="地区筛选">
             <span class="group-label">地区</span>
             <button
-              v-for="region in regions"
-              :key="region"
-              :class="{ selected: selectedRegions.includes(region) }"
+              v-for="region in regionOptions"
+              :key="region.id"
+              :class="{ selected: selectedRegions.includes(region.name) }"
               type="button"
-              @click="toggleValue(selectedRegions, region)"
+              @click="toggleValue(selectedRegions, region.name)"
             >
-              {{ region }}
+              {{ region.name }}
             </button>
           </div>
 
@@ -430,8 +975,8 @@ function toggleFavorite(attractionId) {
         </section>
 
         <section v-else class="empty-state">
-          <h2>没有匹配的景点</h2>
-          <p>调整地区、人群或类型后再查看。</p>
+          <h2>{{ attractionsLoading ? '正在加载景点' : '没有匹配的景点' }}</h2>
+          <p>{{ attractionsError || '调整地区、人群或类型后再查看。' }}</p>
           <button class="primary-btn" type="button" @click="clearFilters">清空筛选</button>
         </section>
       </section>
@@ -485,8 +1030,8 @@ function toggleFavorite(attractionId) {
 
             <section>
               <h2>到达方式</h2>
-              <div class="transport-grid">
-                <div v-for="(value, key) in selectedAttraction.transportation" :key="key">
+              <div v-if="Object.keys(selectedTransportation).length" class="transport-grid">
+                <div v-for="(value, key) in selectedTransportation" :key="key">
                   <strong>
                     {{
                       {
@@ -500,20 +1045,23 @@ function toggleFavorite(attractionId) {
                   <p>{{ value }}</p>
                 </div>
               </div>
+              <p v-else>暂无到达方式信息。</p>
             </section>
 
             <section>
               <h2>推荐路线</h2>
-              <ol class="step-list">
+              <ol v-if="selectedAttraction.routeTips.length" class="step-list">
                 <li v-for="tip in selectedAttraction.routeTips" :key="tip">{{ tip }}</li>
               </ol>
+              <p v-else>暂无推荐路线。</p>
             </section>
 
             <section>
               <h2>必看亮点</h2>
-              <div class="tag-row large">
+              <div v-if="selectedAttraction.highlights.length" class="tag-row large">
                 <span v-for="item in selectedAttraction.highlights" :key="item">{{ item }}</span>
               </div>
+              <p v-else>暂无亮点信息。</p>
             </section>
 
             <section>
@@ -525,16 +1073,18 @@ function toggleFavorite(attractionId) {
 
             <section>
               <h2>注意事项</h2>
-              <ul class="plain-list">
+              <ul v-if="selectedAttraction.notices.length" class="plain-list">
                 <li v-for="notice in selectedAttraction.notices" :key="notice">{{ notice }}</li>
               </ul>
+              <p v-else>暂无注意事项。</p>
             </section>
 
             <section>
               <h2>周边推荐</h2>
-              <div class="nearby-list">
+              <div v-if="selectedAttraction.nearby.length" class="nearby-list">
                 <span v-for="item in selectedAttraction.nearby" :key="item">{{ item }}</span>
               </div>
+              <p v-else>暂无周边推荐。</p>
             </section>
           </div>
         </div>
@@ -544,15 +1094,17 @@ function toggleFavorite(attractionId) {
         <form class="auth-panel" @submit.prevent="handleLogin">
           <h1>登录</h1>
           <label>
-            <span>邮箱</span>
-            <input v-model="loginForm.email" type="email" autocomplete="email" />
+            <span>用户名或邮箱</span>
+            <input v-model="loginForm.identifier" type="text" autocomplete="username" />
           </label>
           <label>
             <span>密码</span>
             <input v-model="loginForm.password" type="password" autocomplete="current-password" />
           </label>
           <p v-if="authError" class="form-error">{{ authError }}</p>
-          <button class="primary-btn wide" type="submit">登录</button>
+          <button class="primary-btn wide" type="submit" :disabled="authLoading">
+            {{ authLoading ? '登录中' : '登录' }}
+          </button>
           <button class="link-btn" type="button" @click="navigate('/register')">创建账号</button>
         </form>
       </section>
@@ -581,9 +1133,521 @@ function toggleFavorite(attractionId) {
             <span>同意用户协议</span>
           </label>
           <p v-if="authError" class="form-error">{{ authError }}</p>
-          <button class="primary-btn wide" type="submit">注册并登录</button>
+          <button class="primary-btn wide" type="submit" :disabled="authLoading">
+            {{ authLoading ? '注册中' : '注册并登录' }}
+          </button>
           <button class="link-btn" type="button" @click="navigate('/login')">已有账号登录</button>
         </form>
+      </section>
+
+      <section v-else-if="routeName === 'admin'" class="admin-view">
+        <div v-if="isAdmin" class="admin-shell">
+          <aside class="admin-sidebar" aria-label="后台导航">
+            <div class="admin-side-brand">
+              <strong>Trip Admin</strong>
+              <span>Full / Expanded</span>
+            </div>
+
+            <button
+              :class="['admin-menu-item', { active: isAdminHome }]"
+              type="button"
+              @click="navigate('/admin')"
+            >
+              <span>主页</span>
+            </button>
+
+            <button class="admin-menu-group" type="button" @click="adminSettingsOpen = !adminSettingsOpen">
+              <span>系统管理</span>
+              <span>{{ adminSettingsOpen ? '▾' : '▸' }}</span>
+            </button>
+
+            <div v-if="adminSettingsOpen" class="admin-sub-menu">
+              <button
+                :class="['admin-menu-item', 'sub', { active: isAdminUsersPage }]"
+                type="button"
+                @click="navigate('/admin/users')"
+              >
+                <span>用户管理</span>
+              </button>
+              <button
+                :class="['admin-menu-item', 'sub', { active: isAdminRegionsPage }]"
+                type="button"
+                @click="navigate('/admin/regions')"
+              >
+                <span>地区</span>
+              </button>
+            </div>
+
+            <button class="admin-menu-group" type="button" @click="adminTravelOpen = !adminTravelOpen">
+              <span>旅游</span>
+              <span>{{ adminTravelOpen ? '▾' : '▸' }}</span>
+            </button>
+
+            <div v-if="adminTravelOpen" class="admin-sub-menu">
+              <button
+                :class="['admin-menu-item', 'sub', { active: isAdminAttractionsPage }]"
+                type="button"
+                @click="navigate('/admin/attractions')"
+              >
+                <span>景点管理</span>
+              </button>
+            </div>
+          </aside>
+
+          <div class="admin-main">
+            <div class="admin-head">
+              <div>
+                <h1>
+                  {{
+                    isAdminUsersPage
+                      ? '用户列表'
+                      : isAdminRegionsPage
+                        ? '地区管理'
+                        : isAdminAttractionsPage
+                          ? '景点管理'
+                          : '后台主页'
+                  }}
+                </h1>
+                <p>
+                  {{
+                    isAdminUsersPage
+                      ? '查看注册信息、重置密码和调整账号状态。'
+                      : isAdminRegionsPage
+                        ? '维护地区 ID 和地区名称。'
+                        : isAdminAttractionsPage
+                          ? '维护景点基础信息，控制景点启用状态。'
+                          : '查看后台概览，进入左侧菜单管理基础数据。'
+                  }}
+                </p>
+              </div>
+              <div class="admin-head-actions">
+                <button v-if="isAdminRegionsPage" class="primary-btn" type="button" @click="openNewRegionDialog">
+                  新增
+                </button>
+                <button v-if="isAdminAttractionsPage" class="primary-btn" type="button" @click="openNewAttractionDialog">
+                  新增
+                </button>
+                <button class="ghost-btn" type="button" :disabled="adminLoading" @click="loadAdminDataIfNeeded">
+                  刷新
+                </button>
+              </div>
+            </div>
+
+            <p v-if="adminError" class="form-error">{{ adminError }}</p>
+            <p v-if="adminMessage" class="form-success">{{ adminMessage }}</p>
+
+            <section v-if="isAdminHome" class="admin-home-panel">
+              <div class="admin-stat-grid">
+                <div>
+                  <span>注册用户</span>
+                  <strong>{{ adminStats.total }}</strong>
+                </div>
+                <div>
+                  <span>启用账号</span>
+                  <strong>{{ adminStats.active }}</strong>
+                </div>
+                <div>
+                  <span>停用账号</span>
+                  <strong>{{ adminStats.disabled }}</strong>
+                </div>
+                <div>
+                  <span>管理员</span>
+                  <strong>{{ adminStats.admins }}</strong>
+                </div>
+                <div>
+                  <span>地区总数</span>
+                  <strong>{{ adminRegionStats.total }}</strong>
+                </div>
+                <div>
+                  <span>启用地区</span>
+                  <strong>{{ adminRegionStats.active }}</strong>
+                </div>
+                <div>
+                  <span>停用地区</span>
+                  <strong>{{ adminRegionStats.disabled }}</strong>
+                </div>
+                <div>
+                  <span>景点总数</span>
+                  <strong>{{ adminAttractionStats.total }}</strong>
+                </div>
+                <div>
+                  <span>启用景点</span>
+                  <strong>{{ adminAttractionStats.active }}</strong>
+                </div>
+                <div>
+                  <span>停用景点</span>
+                  <strong>{{ adminAttractionStats.disabled }}</strong>
+                </div>
+              </div>
+              <div class="admin-home-actions">
+                <button class="primary-btn" type="button" @click="navigate('/admin/users')">打开用户列表</button>
+                <button class="ghost-btn" type="button" @click="navigate('/admin/regions')">打开地区列表</button>
+                <button class="ghost-btn" type="button" @click="navigate('/admin/attractions')">打开景点列表</button>
+              </div>
+            </section>
+
+            <section v-else-if="isAdminUsersPage" class="admin-list-panel">
+              <div class="admin-table-wrap">
+                <table class="admin-table">
+                  <thead>
+                    <tr>
+                      <th>用户名</th>
+                      <th>邮箱</th>
+                      <th>角色</th>
+                      <th>状态</th>
+                      <th>注册时间</th>
+                      <th>重置密码</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="user in adminUsers" :key="user.id">
+                      <td>{{ user.username }}</td>
+                      <td>{{ user.email }}</td>
+                      <td>{{ user.role === 'admin' ? '管理员' : '用户' }}</td>
+                      <td>
+                        <span :class="['status-pill', user.isActive ? 'active' : 'disabled']">
+                          {{ user.isActive ? '启用' : '停用' }}
+                        </span>
+                      </td>
+                      <td>{{ new Date(user.createdAt).toLocaleDateString('zh-CN') }}</td>
+                      <td>
+                        <form class="inline-form" @submit.prevent="resetUserPassword(user)">
+                          <input
+                            v-model="resetPasswords[user.id]"
+                            type="password"
+                            autocomplete="new-password"
+                            placeholder="新密码"
+                          />
+                          <button class="ghost-btn" type="submit" :disabled="adminLoading">重置</button>
+                        </form>
+                      </td>
+                      <td>
+                        <button
+                          v-if="user.isActive"
+                          class="danger-btn"
+                          type="button"
+                          :disabled="adminLoading || user.id === currentUser.id"
+                          @click="setUserStatus(user, false)"
+                        >
+                          停用
+                        </button>
+                        <button
+                          v-else
+                          class="ghost-btn"
+                          type="button"
+                          :disabled="adminLoading"
+                          @click="setUserStatus(user, true)"
+                        >
+                          启用
+                        </button>
+                      </td>
+                    </tr>
+                    <tr v-if="!adminLoading && adminUsers.length === 0">
+                      <td colspan="7">暂无用户。</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section v-else-if="isAdminRegionsPage" class="admin-attractions-panel">
+              <div class="admin-list-toolbar">
+                <div>
+                  <strong>地区列表</strong>
+                  <span>{{ adminRegions.length }} 条记录</span>
+                </div>
+              </div>
+
+              <div class="admin-table-wrap">
+                <table class="admin-table">
+                  <thead>
+                    <tr>
+                      <th>地区 ID</th>
+                      <th>地区名称</th>
+                      <th>状态</th>
+                      <th>更新时间</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="region in adminRegions" :key="region.id">
+                      <td>{{ region.id }}</td>
+                      <td>{{ region.name }}</td>
+                      <td>
+                        <span :class="['status-pill', region.isActive ? 'active' : 'disabled']">
+                          {{ region.isActive ? '启用' : '停用' }}
+                        </span>
+                      </td>
+                      <td>{{ new Date(region.updatedAt).toLocaleDateString('zh-CN') }}</td>
+                      <td>
+                        <div class="row-actions">
+                          <button class="ghost-btn" type="button" @click="editRegion(region)">编辑</button>
+                          <button
+                            v-if="region.isActive"
+                            class="danger-btn"
+                            type="button"
+                            :disabled="adminLoading"
+                            @click="setRegionStatus(region, false)"
+                          >
+                            停用
+                          </button>
+                          <button
+                            v-else
+                            class="ghost-btn"
+                            type="button"
+                            :disabled="adminLoading"
+                            @click="setRegionStatus(region, true)"
+                          >
+                            启用
+                          </button>
+                          <button class="danger-btn" type="button" :disabled="adminLoading" @click="deleteRegion(region)">
+                            删除
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                    <tr v-if="!adminLoading && adminRegions.length === 0">
+                      <td colspan="5">暂无地区。</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div v-if="showRegionDialog" class="modal-backdrop" @click.self="closeRegionDialog">
+                <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="regionDialogTitle">
+                  <div class="modal-head">
+                    <div>
+                      <h2 id="regionDialogTitle">{{ editingRegionId ? '修改地区' : '新增地区' }}</h2>
+                      <p>录入地区 ID 和地区名称后保存。</p>
+                    </div>
+                    <button class="ghost-btn" type="button" @click="closeRegionDialog">关闭</button>
+                  </div>
+
+                  <p v-if="adminError" class="form-error">{{ adminError }}</p>
+
+                  <form class="admin-form-grid" @submit.prevent="saveRegion">
+                    <label>
+                      <span class="required-label">地区 ID</span>
+                      <input
+                        v-model="regionForm.id"
+                        type="text"
+                        :disabled="Boolean(editingRegionId)"
+                        aria-required="true"
+                      />
+                    </label>
+                    <label>
+                      <span class="required-label">地区名称</span>
+                      <input v-model="regionForm.name" type="text" aria-required="true" />
+                    </label>
+                    <div class="admin-form-actions span-2">
+                      <button class="primary-btn" type="submit" :disabled="adminLoading">保存</button>
+                      <button class="ghost-btn" type="button" @click="closeRegionDialog">取消</button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </section>
+
+            <section v-else-if="isAdminAttractionsPage" class="admin-attractions-panel">
+              <div class="admin-list-toolbar">
+                <div>
+                  <strong>景点列表</strong>
+                  <span>{{ adminAttractions.length }} 条记录</span>
+                </div>
+              </div>
+
+              <div class="admin-table-wrap">
+                <table class="admin-table attraction-table">
+                  <thead>
+                    <tr>
+                      <th>景点</th>
+                      <th>地区</th>
+                      <th>城市</th>
+                      <th>热度</th>
+                      <th>状态</th>
+                      <th>更新时间</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="attraction in adminAttractions" :key="attraction.id">
+                      <td>
+                        <strong>{{ attraction.name }}</strong>
+                        <span>{{ attraction.id }}</span>
+                      </td>
+                      <td>{{ attraction.region }}</td>
+                      <td>{{ attraction.city }}</td>
+                      <td>{{ attraction.popularityScore }}</td>
+                      <td>
+                        <span :class="['status-pill', attraction.isActive ? 'active' : 'disabled']">
+                          {{ attraction.isActive ? '启用' : '停用' }}
+                        </span>
+                      </td>
+                      <td>{{ new Date(attraction.updatedAt).toLocaleDateString('zh-CN') }}</td>
+                      <td>
+                        <div class="row-actions">
+                          <button class="ghost-btn" type="button" @click="editAttraction(attraction)">编辑</button>
+                          <button
+                            v-if="attraction.isActive"
+                            class="danger-btn"
+                            type="button"
+                            :disabled="adminLoading"
+                            @click="setAttractionStatus(attraction, false)"
+                          >
+                            停用
+                          </button>
+                          <button
+                            v-else
+                            class="ghost-btn"
+                            type="button"
+                            :disabled="adminLoading"
+                            @click="setAttractionStatus(attraction, true)"
+                          >
+                            启用
+                          </button>
+                          <button class="danger-btn" type="button" :disabled="adminLoading" @click="deleteAttraction(attraction)">
+                            删除
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                    <tr v-if="!adminLoading && adminAttractions.length === 0">
+                      <td colspan="7">暂无景点。</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div v-if="showAttractionDialog" class="modal-backdrop" @click.self="closeAttractionDialog">
+                <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="attractionDialogTitle">
+                  <div class="modal-head">
+                    <div>
+                      <h2 id="attractionDialogTitle">{{ editingAttractionId ? '修改景点' : '新增景点' }}</h2>
+                      <p>录入景点基础信息后保存，系统会返回景点管理主页。</p>
+                    </div>
+                    <button class="ghost-btn" type="button" @click="closeAttractionDialog">关闭</button>
+                  </div>
+
+                  <p v-if="adminError" class="form-error">{{ adminError }}</p>
+
+                  <form class="admin-form-grid" @submit.prevent="saveAttraction">
+                    <label>
+                      <span class="required-label">景点 ID</span>
+                      <input
+                        v-model="attractionForm.id"
+                        type="text"
+                        :disabled="Boolean(editingAttractionId)"
+                        aria-required="true"
+                      />
+                    </label>
+                    <label>
+                      <span class="required-label">景点名称</span>
+                      <input v-model="attractionForm.name" type="text" aria-required="true" />
+                    </label>
+                    <label>
+                      <span>地区</span>
+                      <select v-model="attractionForm.regionId">
+                        <option value="">选择地区</option>
+                        <option v-for="region in adminRegions" :key="region.id" :value="region.id">
+                          {{ region.name }}
+                        </option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>省份</span>
+                      <input v-model="attractionForm.province" type="text" />
+                    </label>
+                    <label>
+                      <span>城市</span>
+                      <input v-model="attractionForm.city" type="text" />
+                    </label>
+                    <label>
+                      <span>建议时长</span>
+                      <input v-model="attractionForm.suggestedDuration" type="text" />
+                    </label>
+                    <label>
+                      <span>热度</span>
+                      <input v-model.number="attractionForm.popularityScore" type="number" min="0" max="100" />
+                    </label>
+                    <label>
+                      <span>适合月份</span>
+                      <input v-model="attractionForm.bestMonthsText" type="text" placeholder="4, 5, 9, 10" />
+                    </label>
+                    <label class="span-2">
+                      <span>类型</span>
+                      <input v-model="attractionForm.categoriesText" type="text" placeholder="历史文化, 世界遗产" />
+                    </label>
+                    <label class="span-2">
+                      <span>适合人群</span>
+                      <input v-model="attractionForm.audienceTagsText" type="text" placeholder="亲子家庭, 摄影爱好者" />
+                    </label>
+                    <label class="span-2">
+                      <span>地址</span>
+                      <input v-model="attractionForm.address" type="text" />
+                    </label>
+                    <label class="span-2">
+                      <span>预算参考</span>
+                      <input v-model="attractionForm.budget" type="text" />
+                    </label>
+                    <label class="span-2">
+                      <span>封面图</span>
+                      <input v-model="attractionForm.coverImage" type="text" />
+                    </label>
+                    <label class="span-2">
+                      <span>简介</span>
+                      <textarea v-model="attractionForm.summary" rows="3"></textarea>
+                    </label>
+                    <label class="span-2">
+                      <span>出行时间</span>
+                      <textarea v-model="attractionForm.travelTimeTips" rows="3"></textarea>
+                    </label>
+                    <label>
+                      <span>飞机到达</span>
+                      <textarea v-model="attractionForm.transportationPlane" rows="3"></textarea>
+                    </label>
+                    <label>
+                      <span>高铁/火车</span>
+                      <textarea v-model="attractionForm.transportationRail" rows="3"></textarea>
+                    </label>
+                    <label>
+                      <span>市内交通</span>
+                      <textarea v-model="attractionForm.transportationLocal" rows="3"></textarea>
+                    </label>
+                    <label>
+                      <span>自驾</span>
+                      <textarea v-model="attractionForm.transportationSelfDrive" rows="3"></textarea>
+                    </label>
+                    <label class="span-2">
+                      <span>推荐路线</span>
+                      <textarea v-model="attractionForm.routeTipsText" rows="3" placeholder="用英文逗号分隔"></textarea>
+                    </label>
+                    <label class="span-2">
+                      <span>必看亮点</span>
+                      <input v-model="attractionForm.highlightsText" type="text" placeholder="用英文逗号分隔" />
+                    </label>
+                    <label class="span-2">
+                      <span>注意事项</span>
+                      <textarea v-model="attractionForm.noticesText" rows="3" placeholder="用英文逗号分隔"></textarea>
+                    </label>
+                    <label class="span-2">
+                      <span>周边推荐</span>
+                      <input v-model="attractionForm.nearbyText" type="text" placeholder="用英文逗号分隔" />
+                    </label>
+                    <div class="admin-form-actions span-2">
+                      <button class="primary-btn" type="submit" :disabled="adminLoading">保存</button>
+                      <button class="ghost-btn" type="button" @click="closeAttractionDialog">取消</button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+        <div v-else class="empty-state">
+          <h1>没有后台权限</h1>
+          <button class="primary-btn" type="button" @click="navigate('/login')">登录管理员账号</button>
+        </div>
       </section>
 
       <section v-else-if="routeName === 'profile'" class="profile-view">
